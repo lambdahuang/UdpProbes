@@ -5,12 +5,16 @@ import redis
 import json
 import random
 import time
+from termcolor import colored
 
 ADDR_MASK = 24
+SENT_PORT = 55543
+OUTGOING_TTL = 64
 
 def send_udp(UDP_IP, UDP_PORT):
     MESSAGE = ''
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_IP, socket.IP_TTL, OUTGOING_TTL)
     sock.sendto(bytes(MESSAGE, "utf-8"), (UDP_IP, UDP_PORT))
 
 
@@ -44,8 +48,9 @@ def listen(redis_connection):
             orig_ttl = data[36]
             orig_src_ip = socket.inet_ntoa(data[40:44])
             orig_dst_ip = socket.inet_ntoa(data[44:48])
+            orig_dst_port = data[50]<<8|data[51]
 
-            if icmp_type != 3:
+            if icmp_type != 3 or orig_dst_port != SENT_PORT:
                 continue
 
             icmp_ip_network = get_network_by_ip(addr[0], ADDR_MASK)
@@ -54,12 +59,28 @@ def listen(redis_connection):
 
             orig_dst_network = get_network_by_ip(orig_dst_ip, ADDR_MASK)
             orig_dst_network_addr = str(orig_dst_network.network_address)
-            print("{cont}\t{icmp_ip}\t{orig_dst_ip}\t{icmp_type} {icmp_code}".format(
+
+            hop_distance = OUTGOING_TTL - orig_ttl
+
+            if icmp_ip_addr == orig_dst_ip:
+                ip_match_str = "Matched"
+                ip_match_color = "green"
+                ip_match_sign = 1
+            else:
+                ip_match_str = "Unmatched"
+                ip_match_color = "red"
+                ip_match_sign = 0
+
+            print("{cont}\t{icmp_ip}\t{orig_dst_ip}\t{icmp_type} {icmp_code}\t{hop_distance}\t".format(
                 cont=cont,
                 icmp_ip=icmp_ip_addr,
                 orig_dst_ip=orig_dst_ip,
                 icmp_type=icmp_type,
-                icmp_code=icmp_code))
+                icmp_code=icmp_code,
+                hop_distance=hop_distance
+                ),
+                colored(ip_match_str, ip_match_color))
+
             data_dict = dict()
             data_dict = {
                 "icmp_assets": {
@@ -74,23 +95,26 @@ def listen(redis_connection):
                     "orig_dst_ip": orig_dst_ip,
                     "orig_dst_network_addr": orig_dst_network_addr,
                     "orig_ttl": orig_ttl,
-                    "orig_ip": orig_ip,
-                }
+                },
+                "ip_matched": ip_match_sign,
+                "hop_distance": hop_distance
             }
             data_str = json.dumps(data_dict)
             redis_connection.lpush("result", data_str)
-            redis_connection.sadd("visited", orig_ip_network_addr)
-            redis_connection.sadd("visited", icmp_network_addr)
+            redis_connection.sadd("visited", orig_dst_network_addr)
+            # redis_connection.sadd("visited", icmp_network_addr)
+            if ip_match_sign == 0:
+                redis_connection.sadd("unmatched", orig_dst_network_addr)
             if icmp_type == 3 and icmp_code == 3:
                 redis_connection.sadd("port_unreachable", icmp_network_addr)
             if icmp_type == 3 and icmp_code == 2:
-                redis_connection.sadd("protocl_unreachable", icmp_network_addr)
+                redis_connection.sadd("protocol_unreachable", icmp_network_addr)
             if icmp_type == 3 and icmp_code == 1:
                 redis_connection.sadd("address_unreachable", icmp_network_addr)
 
             cont += 1
         except Exception as e:
-            print(e)
+            pass
 
 
 def add_record_redis(
@@ -136,12 +160,11 @@ def send_random_probes(redis_connection):
             if redis_connection.sismember("visited", str(ip_network.network_address)):
                 continue
             print(random_ip)
-            send_udp(random_ip, 55543)
+            send_udp(random_ip, SENT_PORT)
             redis_connection.sadd("sent", str(ip_network.network_address))
             time.sleep(0.001)
         except Exception:
             pass
-
 
 
 if __name__ == "__main__":
