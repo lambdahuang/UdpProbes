@@ -4,6 +4,7 @@ import ipaddress
 import redis
 import json
 import random
+import time
 
 ADDR_MASK = 24
 
@@ -34,48 +35,55 @@ def listen(redis_connection):
     s.setsockopt(socket.SOL_IP, socket.IP_HDRINCL, 1)
     cont = 0
     while 1:
-        data, addr = s.recvfrom(1508)
+        try:
+            data, addr = s.recvfrom(1508)
 
-        icmp_type = data[20]
-        icmp_code = data[21]
-        icmp_ttl = data[8]
-        orig_ttl = data[36]
-        orig_ip = socket.inet_ntoa(data[40:44])
+            icmp_type = data[20]
+            icmp_code = data[21]
+            icmp_ttl = data[8]
+            orig_ttl = data[36]
+            orig_ip = socket.inet_ntoa(data[40:44])
 
-        icmp_ip_network = get_network_by_ip(addr[0], ADDR_MASK)
-        icmp_network_addr = str(icmp_ip_network.network_address)
-        icmp_ip_addr = addr[0]
+            if icmp_type != 3:
+                continue
 
-        orig_ip_network = get_network_by_ip(orig_ip, ADDR_MASK)
-        orig_ip_addr = orig_ip
-        orig_ip_network_addr = str(orig_ip_network.network_address)
-        print("{cont}\t{icmp_ip}\t{orig_ip}\t{icmp_type} {icmp_code}".format(
-            cont=cont,
-            icmp_ip=icmp_ip_addr,
-            orig_ip=orig_ip_addr,
-            icmp_type=icmp_type,
-            icmp_code=icmp_code))
-        data_dict = {
-            icmp_assets: {
-                icmp_ip_addr: icmp_ip_addr,
-                icmp_ip_network: icmp_ip_network,
-                icmp_type: icmp_type,
-                icmp_code: icmp_code,
-                icmp_ttl: icmp_ttl
-            },
-            origin_packet: {
-                orig_ip: orig_ip,
-                orig_ip_network_addr: orig_ip_network_addr,
-                orig_ttl: orig_ttl,
-                orig_ip: orig_ip,
+            icmp_ip_network = get_network_by_ip(addr[0], ADDR_MASK)
+            icmp_network_addr = str(icmp_ip_network.network_address)
+            icmp_ip_addr = addr[0]
+
+            orig_ip_network = get_network_by_ip(orig_ip, ADDR_MASK)
+            orig_ip_addr = orig_ip
+            orig_ip_network_addr = str(orig_ip_network.network_address)
+            print("{cont}\t{icmp_ip}\t{orig_ip}\t{icmp_type} {icmp_code}".format(
+                cont=cont,
+                icmp_ip=icmp_ip_addr,
+                orig_ip=orig_ip_addr,
+                icmp_type=icmp_type,
+                icmp_code=icmp_code))
+            data_dict = dict()
+            data_dict = {
+                "icmp_assets": {
+                    "icmp_ip_addr": icmp_ip_addr,
+                    "icmp_ip_network": icmp_network_addr,
+                    "icmp_type": icmp_type,
+                    "icmp_code": icmp_code,
+                    "icmp_ttl": icmp_ttl
+                },
+                "origin_packet": {
+                    "orig_ip": orig_ip,
+                    "orig_ip_network_addr": orig_ip_network_addr,
+                    "orig_ttl": orig_ttl,
+                    "orig_ip": orig_ip,
+                }
             }
-        }
-        data_str = json.dumps(data_dict)
-        redis_connection.lpush("result", data_str)
-        redis_connection.lpush("visited", orig_ip_network_addr)
-        redis_connection.lpush("visited", icmp_ip_network)
+            data_str = json.dumps(data_dict)
+            redis_connection.lpush("result", data_str)
+            redis_connection.sadd("visited", orig_ip_network_addr)
+            redis_connection.sadd("visited", icmp_network_addr)
 
-        cont += 1
+            cont += 1
+        except Exception as e:
+            print(e)
 
 
 def add_record_redis(
@@ -117,10 +125,13 @@ def send_random_probes(redis_connection):
             continue
         ip_network = get_network_by_ip(str(ip), ADDR_MASK)
         # continue if we already probed
-        if redis_connection.sismember(str(ip_network.network_address)):
+        if redis_connection.sismember("visited", str(ip_network.network_address)):
             continue
         print(random_ip)
-        # send_udp(random_ip, 55543)
+        send_udp(random_ip, 55543)
+        redis_connection.sadd("sent", str(ip_network.network_address))
+        time.sleep(0.1)
+
 
 
 if __name__ == "__main__":
