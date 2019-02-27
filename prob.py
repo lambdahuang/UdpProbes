@@ -42,7 +42,8 @@ def listen(redis_connection):
             icmp_code = data[21]
             icmp_ttl = data[8]
             orig_ttl = data[36]
-            orig_ip = socket.inet_ntoa(data[40:44])
+            orig_src_ip = socket.inet_ntoa(data[40:44])
+            orig_dst_ip = socket.inet_ntoa(data[44:48])
 
             if icmp_type != 3:
                 continue
@@ -51,13 +52,12 @@ def listen(redis_connection):
             icmp_network_addr = str(icmp_ip_network.network_address)
             icmp_ip_addr = addr[0]
 
-            orig_ip_network = get_network_by_ip(orig_ip, ADDR_MASK)
-            orig_ip_addr = orig_ip
-            orig_ip_network_addr = str(orig_ip_network.network_address)
-            print("{cont}\t{icmp_ip}\t{orig_ip}\t{icmp_type} {icmp_code}".format(
+            orig_dst_network = get_network_by_ip(orig_dst_ip, ADDR_MASK)
+            orig_dst_network_addr = str(orig_dst_network.network_address)
+            print("{cont}\t{icmp_ip}\t{orig_dst_ip}\t{icmp_type} {icmp_code}".format(
                 cont=cont,
                 icmp_ip=icmp_ip_addr,
-                orig_ip=orig_ip_addr,
+                orig_dst_ip=orig_dst_ip,
                 icmp_type=icmp_type,
                 icmp_code=icmp_code))
             data_dict = dict()
@@ -70,8 +70,9 @@ def listen(redis_connection):
                     "icmp_ttl": icmp_ttl
                 },
                 "origin_packet": {
-                    "orig_ip": orig_ip,
-                    "orig_ip_network_addr": orig_ip_network_addr,
+                    "orig_src_ip": orig_src_ip,
+                    "orig_dst_ip": orig_dst_ip,
+                    "orig_dst_network_addr": orig_dst_network_addr,
                     "orig_ttl": orig_ttl,
                     "orig_ip": orig_ip,
                 }
@@ -80,6 +81,12 @@ def listen(redis_connection):
             redis_connection.lpush("result", data_str)
             redis_connection.sadd("visited", orig_ip_network_addr)
             redis_connection.sadd("visited", icmp_network_addr)
+            if icmp_type == 3 and icmp_code == 3:
+                redis_connection.sadd("port_unreachable", icmp_network_addr)
+            if icmp_type == 3 and icmp_code == 2:
+                redis_connection.sadd("protocl_unreachable", icmp_network_addr)
+            if icmp_type == 3 and icmp_code == 1:
+                redis_connection.sadd("address_unreachable", icmp_network_addr)
 
             cont += 1
         except Exception as e:
@@ -116,21 +123,24 @@ def get_redis_connection(host, port, db):
 def send_random_probes(redis_connection):
     """ send random probes """
     while 1:
-        random_ip = '.'.join('%s' % random.randint(0, 255) for i in range(4))
-        # avoid brodcast address
-        ip = ipaddress.IPv4Address(random_ip)
-        # avoid reserved, private, unspecified ip address
-        if ip.is_multicast or ip.is_reserved or ip.is_private or\
-                ip.is_unspecified:
-            continue
-        ip_network = get_network_by_ip(str(ip), ADDR_MASK)
-        # continue if we already probed
-        if redis_connection.sismember("visited", str(ip_network.network_address)):
-            continue
-        print(random_ip)
-        send_udp(random_ip, 55543)
-        redis_connection.sadd("sent", str(ip_network.network_address))
-        time.sleep(0.1)
+        try:
+            random_ip = '.'.join('%s' % random.randint(0, 255) for i in range(4))
+            # avoid brodcast address
+            ip = ipaddress.IPv4Address(random_ip)
+            # avoid reserved, private, unspecified ip address
+            if ip.is_multicast or ip.is_reserved or ip.is_private or\
+                    ip.is_unspecified:
+                continue
+            ip_network = get_network_by_ip(str(ip), ADDR_MASK)
+            # continue if we already probed
+            if redis_connection.sismember("visited", str(ip_network.network_address)):
+                continue
+            print(random_ip)
+            send_udp(random_ip, 55543)
+            redis_connection.sadd("sent", str(ip_network.network_address))
+            time.sleep(0.001)
+        except Exception:
+            pass
 
 
 
